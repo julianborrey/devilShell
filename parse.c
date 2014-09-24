@@ -9,9 +9,9 @@ bool init_job(job_t *j)
 	if(!(j->commandinfo = (char *) calloc(MAX_LEN_CMDLINE,sizeof(char))))
 		return false;
 	j->first_process = NULL;
-	j->pgid = -1; 	                /* -1 indicates spawn new job*/
+	j->pgid = -1; 	               /* -1 indicates spawn new job*/
 	j->notified = false;
-	j->mystdin = STDIN_FILENO; 	    /* 0 */
+	j->mystdin  = STDIN_FILENO; 	/* 0 */
 	j->mystdout = STDOUT_FILENO;	/* 1 */ 
 	j->mystderr = STDERR_FILENO;	/* 2 */
 	j->bg = false;

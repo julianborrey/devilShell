@@ -18,8 +18,9 @@
 #define STANDARD_ERROR 2
 
  //flags for IO files
- #define INPUT_FILE_FLAGS  O_RDONLY
- #define OUTPUT_FILE_FLAGS (O_WRONLY | O_TRUNC | O_CREAT)
+ #define INPUT_FILE_FLAGS     O_RDONLY
+ #define OUTPUT_FILE_FLAGS    (O_WRONLY | O_TRUNC | O_CREAT)
+ #define NEW_FILE_PERMISSIONS (S_IRUSR | S_IWUSR)
 
 //given functions
  /* Grab control of the terminal for the calling process pgid.  */
@@ -27,13 +28,13 @@ void seize_tty(pid_t callingprocess_pgid);
 
 void continue_job(job_t *j); /* resume a stopped job */
 
-void spawn_job(job_t *j, bool fg); /* spawn a new job */
+void spawn_job(job_t *j); /* spawn a new job */
 
 /* Sets the process group id for a given job and process */
 int set_child_pgid(job_t *j, process_t *p);
 
 /* Creates the context for a new child by setting the pid, pgid and tcsetpgrp */
-void new_child(job_t *j, process_t *p, bool fg);
+void new_child(job_t *j, process_t *p);
 
 /* builtin_cmd - If the user has typed a built-in command then execute it immediately. */
 bool builtin_cmd(job_t *job, int argc, char **argv);
@@ -97,7 +98,7 @@ void cycleThroughEachJob(job_t* firstJob){
      if(!builtin_cmd(currentJob, 
                      currentJob->first_process->argc,
                      currentJob->first_process->argv)){ //for process
-        spawn_job(currentJob, !(currentJob->bg));
+        spawn_job(currentJob);
      }
      currentJob = currentJob->next; //check out next job
   }
@@ -105,16 +106,8 @@ void cycleThroughEachJob(job_t* firstJob){
   return;
 }
 
-/* Sets the process group id for a given job and process */
-int set_child_pgid(job_t *j, process_t *p)
-{
-    if (j->pgid < 0) /* first child: use its pid for job pgid */
-        j->pgid = p->pid;
-    return(setpgid(p->pid,j->pgid)); //set pgid of process to put it in the group
-}
-
 /* Creates the context for a new child by setting the pid, pgid and tcsetpgrp */
-void new_child(job_t *j, process_t *p, bool fg)
+void new_child(job_t *j, process_t *p)
 {
    /* establish a new process group, and put the child in
    * foreground if requested
@@ -132,17 +125,16 @@ void new_child(job_t *j, process_t *p, bool fg)
    set_child_pgid(j, p);
    
    //change input stream if < used
-   if(changeStreamToFile(p->ifile, STANDARD_INPUT, INPUT_FILE_FLAGS) == -1){
-      perror("Error updating input stream");
+   if(changeStreamToFile(p->ifile, STDIN_FILENO, INPUT_FILE_FLAGS) == -1){
+      //perror("Error updating input stream");
+      return; //if error, return, don't exec
    }
 
    //change output stream if > used
-   if(changeStreamToFile(p->ofile, STANDARD_OUTPUT, OUTPUT_FILE_FLAGS) == -1){
-      perror("Error updating output stream");
+   if(changeStreamToFile(p->ofile, STDOUT_FILENO, OUTPUT_FILE_FLAGS) == -1){
+      //perror("Error updating output stream");
+      return; //if error, return, don't exec
    }
-   
-   if(fg) // if fg is set
-      seize_tty(j->pgid); // assign the terminal
    
    /* Set the handling for job control signals back to the default. */
    signal(SIGTTOU, SIG_DFL);
@@ -153,6 +145,14 @@ void new_child(job_t *j, process_t *p, bool fg)
    return; //token return
 }
 
+/* Sets the process group id for a given job and process */
+int set_child_pgid(job_t *j, process_t *p)
+{
+    if (j->pgid < 0) /* first child: use its pid for job pgid */
+        j->pgid = p->pid;
+    return(setpgid(p->pid,j->pgid)); //set pgid of process to put it in the group
+}
+
 //updates the IO stream of child process to be for a file
 int changeStreamToFile(char* fileName, int stream, int flags){
    int newFd;         //for the file we open
@@ -161,13 +161,19 @@ int changeStreamToFile(char* fileName, int stream, int flags){
    //there was no input file andwe do nothing
 
    if(fileName != NULL){              //if we have a file we continue
-      newFd  = open(fileName, flags); //get fd for file
+      newFd  = open(fileName, flags, NEW_FILE_PERMISSIONS); //get fd for file
       result = dup2(newFd, stream);   //update stream to map to that file
       close(newFd);                   //close our reference to the file
    }
 
    return result; //return result fo dup2
 }
+
+
+////////// CHEKC IF ABOVE WILL CHANGE PERMISSIONS EVEN ON A READ
+
+
+
 
 /* Spawning a process with job control. fg is true if the 
  * newly-created process is to be placed in the foreground. 
@@ -179,7 +185,7 @@ int changeStreamToFile(char* fileName, int stream, int flags){
  * subsequent processes in a pipeline.
  * */
 
-void spawn_job(job_t *j, bool fg) 
+void spawn_job(job_t *j) 
 {
   
 	pid_t pid;
@@ -198,7 +204,7 @@ void spawn_job(job_t *j, bool fg)
 
           case 0: /* child process  */
             p->pid = getpid();
-            new_child(j, p, fg);
+            new_child(j, p);
             
 	          /* YOUR CODE HERE?  Child-side code for new process. */
             perror("Failed to execute process");
@@ -210,6 +216,10 @@ void spawn_job(job_t *j, bool fg)
             p->pid = pid;
             set_child_pgid(j, p);
             int status;
+
+            if(!(j->bg))          // if not background is set
+              seize_tty(j->pgid); // assign the terminal
+
             waitpid(p->pid, &status, 0);
 
             /* YOUR CODE HERE?  Parent-side code for new process.  */

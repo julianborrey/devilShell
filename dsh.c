@@ -12,15 +12,21 @@
 //length of buffer for string to hold path
 #define PATH_BUF_LEN 1024
 
-//the numbers for stream
-#define STANDARD_INPUT 0
-#define STANDARD_OUTPUT 1
-#define STANDARD_ERROR 2
+//flags for IO files
+#define INPUT_FILE_FLAGS     O_RDONLY
+#define OUTPUT_FILE_FLAGS    (O_WRONLY | O_TRUNC | O_CREAT)
+#define NEW_FILE_PERMISSIONS (S_IRUSR | S_IWUSR)
 
- //flags for IO files
- #define INPUT_FILE_FLAGS     O_RDONLY
- #define OUTPUT_FILE_FLAGS    (O_WRONLY | O_TRUNC | O_CREAT)
- #define NEW_FILE_PERMISSIONS (S_IRUSR | S_IWUSR)
+//when we have no pipe, use an impossible fd for a pipe
+#define NO_PIPE -1
+
+typedef struct _activeList {
+   job_t* job; //the job that is active
+   struct _activeList* next; //the next node in the LList
+} activeJobNode;
+
+//list of active jobs
+activeJobNode* activeList;
 
 //given functions
  /* Grab control of the terminal for the calling process pgid.  */
@@ -34,7 +40,7 @@ void spawn_job(job_t *j); /* spawn a new job */
 int set_child_pgid(job_t *j, process_t *p);
 
 /* Creates the context for a new child by setting the pid, pgid and tcsetpgrp */
-void new_child(job_t *j, process_t *p);
+void new_child(job_t *j, process_t *p, int inPipe, int outPipe);
 
 /* builtin_cmd - If the user has typed a built-in command then execute it immediately. */
 bool builtin_cmd(job_t *job, int argc, char **argv);
@@ -51,11 +57,29 @@ char* getCurrentPath(void);
 //updates the IO stream of child process to be for a file
 int changeStreamToFile(char* fileName, int stream, int flags);
 
+//makes a job node (malloc's it)
+activeJobNode* newJobNode(job_t* j);
+
+//adds job to active lise
+void addJobToActiveList(job_t* j);
+
+//removes job from active list
+void removeJobFromActiveList(job_t* j);
+
+//prints the pid, status and cmd of a single job
+void printSingleActiveJob(job_t* j);
+
+//prints the list of active jobs
+void printActiveJobs(activeJobNode* list);
+
 
 int main(int argc, char* argv[]) {
    init_dsh();
    DEBUG("Successfully initialized\n");
    
+   //head of a linked list of all jobs that are active
+   activeJobNode* activeList = NULL;
+
    while(1) {
       job_t *j = NULL;
       if(!(j = readcmdline(promptmsg(getpid())))) {
@@ -107,8 +131,8 @@ void cycleThroughEachJob(job_t* firstJob){
 }
 
 /* Creates the context for a new child by setting the pid, pgid and tcsetpgrp */
-void new_child(job_t *j, process_t *p)
-{
+void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
+{  
    /* establish a new process group, and put the child in
    * foreground if requested
    */
@@ -118,27 +142,33 @@ void new_child(job_t *j, process_t *p)
    * the dsh and in the individual child processes because of
    * potential race conditions.  
    * */
-   
    p->pid = getpid();
    
    /* also establish child process group in child to avoid race (if parent has not done it yet). */
    set_child_pgid(j, p);
-   
+
+   /* DEALING WITH INPUT - WE ALREADY HAVE A PIPE OR USE A FILE */
    //change input stream if < used
-   if(changeStreamToFile(p->ifile, STDIN_FILENO, INPUT_FILE_FLAGS) == -1){
+   if(inPipe != NO_PIPE) { //use a pipe
+      dup2(inPipe, STDIN_FILENO);
+   } else if(changeStreamToFile(p->ifile, STDIN_FILENO, INPUT_FILE_FLAGS) == -1){
       //perror("Error updating input stream");
       return; //if error, return, don't exec
+   } else {
+
    }
 
-   //change output stream if > used
-   if(changeStreamToFile(p->ofile, STDOUT_FILENO, OUTPUT_FILE_FLAGS) == -1){
+   /* DEALING WITH OUTPUT - PIPE OR FILE */
+   //if this process points to another then we are using a pipe
+   if(outPipe != NO_PIPE){
+      dup2(outPipe, STDOUT_FILENO);
+   } else if(changeStreamToFile(p->ofile, STDOUT_FILENO, OUTPUT_FILE_FLAGS) == -1){
       //perror("Error updating output stream");
       return; //if error, return, don't exec
    }
    
    /* Set the handling for job control signals back to the default. */
    signal(SIGTTOU, SIG_DFL);
-   
    //never coming back after this
    execvp(p->argv[0], p->argv);
 
@@ -190,45 +220,126 @@ void spawn_job(job_t *j)
   
 	pid_t pid;
 	process_t *p;
+  
+  //register this job as active
+  addJobToActiveList(j);
+
+  //setup for pipes between the processes
+  int fds[2] = {NO_PIPE, NO_PIPE}; //for pipes
+  int status;
+  int pipeWrite = NO_PIPE;
+  int pipeRead = NO_PIPE;
 
 	for(p = j->first_process; p; p = p->next) {
-
-	  /* YOUR CODE HERE? */
+    /* YOUR CODE HERE? */
 	  /* Builtin commands are already taken care earlier */
-	  
+    
+    close(pipeWrite);
+	  if(p->next != NULL){ //if there is a pipe here
+       pipe(fds); //get a pipe
+       pipeWrite = fds[1];
+    } else {
+       pipeWrite = NO_PIPE;
+    }
+
 	  switch (pid = fork()) {
 
-          case -1: /* fork failure */
-            perror("fork");
-            exit(EXIT_FAILURE);
+      case -1: /* fork failure */
+        perror("fork");
+        exit(EXIT_FAILURE);
 
-          case 0: /* child process  */
-            p->pid = getpid();
-            new_child(j, p);
-            
-	          /* YOUR CODE HERE?  Child-side code for new process. */
-            perror("Failed to execute process");
-            exit(EXIT_FAILURE);  /* NOT REACHED */
-            break;    /* NOT REACHED */
+      case 0: /* child process  */
+        p->pid = getpid();
+        new_child(j, p, pipeRead, pipeWrite);
+        
+        /* YOUR CODE HERE?  Child-side code for new process. */
+        perror("Failed to execute process");
+        exit(EXIT_FAILURE);  /* NOT REACHED */
+        break;    /* NOT REACHED */
 
-          default: /* parent */
-            /* establish child process group */
-            p->pid = pid;
-            set_child_pgid(j, p);
-            int status;
+      default: /* parent */
+        /* establish child process group */
+        p->pid = pid;
+        set_child_pgid(j, p);
+        close(pipeRead);
+        pipeRead = fds[0];
+        
+        if(!(j->bg)){         // if not background is set
+          seize_tty(j->pgid); // assign the terminal
+        }
 
-            if(!(j->bg))          // if not background is set
-              seize_tty(j->pgid); // assign the terminal
-
-            waitpid(p->pid, &status, 0);
-
-            /* YOUR CODE HERE?  Parent-side code for new process.  */
      }
-
-            /* YOUR CODE HERE?  Parent-side code for new job.*/
-     seize_tty(getpid()); // assign the terminal back to dsh
+     
+     /* YOUR CODE HERE?  Parent-side code for new job.*/
+     //seize_tty(getpid()); // assign the terminal back to dsh
    
    }
+
+   //we have run all children concurrently
+   //now we wait for them all to finish
+   waitpid((-1 * j->pgid), &status, 0);
+   //ensures that jobs are run sequentially
+
+   //now finished with the job
+   removeJobFromActiveList(j);
+
+   //get terminal bach for shell
+   seize_tty(getpid());
+
+   return;
+}
+
+//makes a job node (malloc's it)
+activeJobNode* newJobNode(job_t* j){
+   activeJobNode* node = (activeJobNode*) malloc(sizeof(struct _activeList)); 
+   node->job = j;
+   node->next = NULL;
+   return node;
+}
+
+//adds job to active lise
+void addJobToActiveList(job_t* j){
+   activeJobNode* current = activeList;
+
+   //if first one
+   if(current == NULL){ //comparing ptrs
+      activeList = newJobNode(j);
+      return;
+   }
+
+   //not first one, go through list
+   while(current->next != NULL){ //iterate through list
+      current = current->next;
+   }
+
+   current->next = newJobNode(j);
+   return;
+}
+
+//removes job from active list
+void removeJobFromActiveList(job_t* j){
+   activeJobNode* prev = NULL;
+   activeJobNode* current = activeList;
+
+   //if first one
+   if((current->job) == j){ //comparing ptrs
+      activeList = activeList->next; //skip over
+      free(current);
+      return;
+   }
+
+   //not first one, go through list
+   while(current != NULL){ //iterate through list
+      if((current->job) == j){ //if addresses match
+         prev->next = current->next; //skip over current
+         free(current);
+         return;                     //to remove from list
+      }
+      prev = current;
+      current = current->next;
+   }
+
+   return;
 }
 
 /* Sends SIGCONT signal to wake up the blocked job */
@@ -256,7 +367,7 @@ bool builtin_cmd(job_t* job, int argc, char **argv){
       
       //our list is already in sorted order
       //we just have to print the list
-      //print_job(activeJobs);
+      printActiveJobs(activeList);
       
       return true;
    
@@ -269,16 +380,6 @@ bool builtin_cmd(job_t* job, int argc, char **argv){
          perror("Problem changing directory");
       } else {
          char* newPath = getCurrentPath();
-
-         /*
-         int numCharDiff = getDifference(oldPath, newPath);
-         if(numCharDiff > 0){        //new path was bigger
-            newPath = highlightPathDiff(newPath, numCharDiff);
-         } else if(numCharDiff < 0){ //old path was bigger
-            oldPath = highlightPathDiff(oldPath, numCharDiff);
-         } //otherwise we had numCharDiff == 0 and so we do nothing
-         */
-
          printf("%s\n%s\n", oldPath, newPath);
       }
       return true;
@@ -295,6 +396,26 @@ bool builtin_cmd(job_t* job, int argc, char **argv){
    
    }
    return false;       /* not a builtin command */
+}
+
+//prints the list of active jobs
+void printActiveJobs(activeJobNode* list){
+   printf("Active jobs:\n");
+
+   activeJobNode* current = list;
+   while(current != NULL){
+      printSingleActiveJob(current->job);
+      current = current->next;
+   }
+   
+   return;
+}
+
+//prints the pid, status and cmd of a single job
+void printSingleActiveJob(job_t* j){
+   
+      printf("\t[%d] - %s - %s", j->pgid, "Active", j->commandinfo);
+    
 }
 
 /* Build prompt messaage */

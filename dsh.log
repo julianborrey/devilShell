@@ -1,0 +1,18 @@
+6008(Launched): %s
+execvp: No such file or directory
+6010(Launched): 0
+execvp: No such file or directory
+6011(Launched): 0
+execvp: No such file or directory
+6012(Launched): 00
+execvp: No such file or directory
+6013(Launched): cat a[C[C[C[C[C[C[C[C[
+cat: a\033[C\033[C\033[C\033[C\033[C\033[C\033[C\033[C\033[: No such file or directory
+6014(Launched): l
+execvp: No such file or directory
+6015(Launched): f
+execvp: No such file or directory
+6016(Launched): clear
+6017(Launched): l
+execvp: No such file or directory
+6018(Launched): cat a.txt

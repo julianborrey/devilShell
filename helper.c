@@ -58,7 +58,7 @@ bool free_job(job_t *j)
 		int i;
 		for(i = 0; i < p->argc; i++)
 			free(p->argv[i]);
-		free(p->argv);
+		   free(p->argv);
         	free(p->ifile);
         	free(p->ofile);
 	}

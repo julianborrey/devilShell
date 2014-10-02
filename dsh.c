@@ -20,6 +20,9 @@
 //when we have no pipe, use an impossible fd for a pipe
 #define NO_PIPE -1
 
+//generic error code used in many functions
+#define GENERAL_ERROR -1
+
 typedef struct _activeList {
    job_t* job; //the job that is active
    bool crashed; //true is a process in the job crashed
@@ -29,11 +32,11 @@ typedef struct _activeList {
 //list of active jobs
 activeJobNode* activeList;
 
-//given functions
- /* Grab control of the terminal for the calling process pgid.  */
+/* given functions */
+/* Grab control of the terminal for the calling process pgid.  */
 void seize_tty(pid_t callingprocess_pgid); 
 
-void continue_job(job_t *j); /* resume a stopped job */
+void continue_job(job_t *j, bool bg); /* resume a stopped job */
 
 void spawn_job(job_t *j); /* spawn a new job */
 
@@ -49,7 +52,7 @@ bool builtin_cmd(job_t *job, int argc, char **argv);
 char* promptmsg(); /* Build prompt messaage */
 
 
-//my functions
+/* my functions */
 void cycleThroughEachJob(job_t* firstJob); //does each job
 
 //gets a pointer to a string of the current path
@@ -62,10 +65,7 @@ int changeStreamToFile(char* fileName, int stream, int flags);
 activeJobNode* newJobNode(job_t* j);
 
 //adds job to active lise
-void addJobToActiveList(job_t* j);
-
-//removes job from active list
-void removeJobFromActiveList(job_t* j);
+activeJobNode* addJobToActiveList(job_t* j);
 
 //removes job from active list
 void removeActiveJobFromList(activeJobNode* aj);
@@ -82,15 +82,6 @@ job_t* getJobToWakeup(char* s);
 //finds the job with the given pgid
 job_t* findJobByPGID(int pgid);
 
-//makes all processes in the job !stopped
-void allProcessesGo(job_t* j);
-
-//make all processes stopped
-void allProcessesStop(job_t* j);
-
-//makes all processes in the job !stopped
-void allProcessesComplete(job_t* j);
-
 //clean the active jobs list for processes which 
 //crashed and didn't report death
 void cleanActiveJobList(activeJobNode* list);
@@ -102,10 +93,13 @@ void freeActiveJob(activeJobNode* j);
 void freeJob(job_t* j);
 
 //updates status fields from value reported from waitpid()
-void examineProcesses(job_t* j);
+void examineProcesses(job_t* j, activeJobNode* aj);
 
 //check processes are not dead
 void checkOnProcesses(activeJobNode* jobNode);
+
+//make all stopped processes in non-stopped state
+void unStopStoppedProcesses(job_t* j);
 
 
 int main(int argc, char* argv[]) {
@@ -128,20 +122,6 @@ int main(int argc, char* argv[]) {
       
       //do each job
       cycleThroughEachJob(j);
-        
-      /* Only for debugging purposes to show parser output; turn off in the
-       * final code */
-      //if(PRINT_INFO) print_job(j);
-      
-
-      /* Your code goes here */
-      /* You need to loop through jobs list since a command line can contain ;*/
-      /* Check for built-in commands */
-      /* If not built-in */
-          /* If job j runs in foreground */
-          /* spawn_job(j,true) */
-          /* else */
-          /* spawn_job(j,false) */
     }
 }
 
@@ -168,15 +148,6 @@ void cycleThroughEachJob(job_t* firstJob){
 /* Creates the context for a new child by setting the pid, pgid and tcsetpgrp */
 void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
 {  
-   /* establish a new process group, and put the child in
-   * foreground if requested
-   */
-   
-   /* Put the process into the process group and give the process
-   * group the terminal, if appropriate.  This has to be done both by
-   * the dsh and in the individual child processes because of
-   * potential race conditions.  
-   * */
    p->pid = getpid();
    
    /* also establish child process group in child to avoid race (if parent has not done it yet). */
@@ -185,19 +156,27 @@ void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
    /* DEALING WITH INPUT - WE ALREADY HAVE A PIPE OR USE A FILE */
    //change input stream if < used
    if(inPipe != NO_PIPE) { //use a pipe
-      dup2(inPipe, STDIN_FILENO);
-   } else if(changeStreamToFile(p->ifile, STDIN_FILENO, INPUT_FILE_FLAGS) == -1){
-      //perror("Error updating input stream");
-      return; //if error, return, don't exec
+      if(dup2(inPipe, STDIN_FILENO) == GENERAL_ERROR){
+        perror("Failed to set up input pipe");
+      }
+   } else if(p->ifile != NULL){
+      if(changeStreamToFile(p->ifile, STDIN_FILENO, INPUT_FILE_FLAGS) == GENERAL_ERROR){
+        //perror("Error updating input stream");
+        return; //if error, return, don't exec
+      }
    } else {
-
+      if(!(j->bg)){          //if not a background job
+        seize_tty(getpid()); //take the terminal
+      }
    }
 
    /* DEALING WITH OUTPUT - PIPE OR FILE */
    //if this process points to another then we are using a pipe
    if(outPipe != NO_PIPE){
-      dup2(outPipe, STDOUT_FILENO);
-   } else if(changeStreamToFile(p->ofile, STDOUT_FILENO, OUTPUT_FILE_FLAGS) == -1){
+      if(dup2(outPipe, STDOUT_FILENO) == GENERAL_ERROR){
+        perror("Failed to set up output pipe");
+      }
+   } else if(changeStreamToFile(p->ofile, STDOUT_FILENO, OUTPUT_FILE_FLAGS) == GENERAL_ERROR){
       //perror("Error updating output stream");
       return; //if error, return, don't exec
    }
@@ -217,8 +196,11 @@ int set_child_pgid(job_t *j, process_t *p, bool child)
     if (j->pgid < 0){ /* first child: use its pid for job pgid */
         j->pgid = p->pid;
 
-       if(child){
-          printf("EXECUTING [%d]: %s\n", j->pgid, j->commandinfo);
+       if(child && j->bg){
+          printf("EXECUTING [%d] (background): %s\n", j->pgid, j->commandinfo);
+       } else if(child){
+          printf("EXECUTING [%d] (foreground): %s\n", j->pgid, j->commandinfo);
+       } else if(child){
        }
     }
         
@@ -234,18 +216,16 @@ int changeStreamToFile(char* fileName, int stream, int flags){
 
    if(fileName != NULL){              //if we have a file we continue
       newFd  = open(fileName, flags, NEW_FILE_PERMISSIONS); //get fd for file
+      if(newFd < 0){ //error handling
+         return GENERAL_ERROR;
+      }
+
       result = dup2(newFd, stream);   //update stream to map to that file
       close(newFd);                   //close our reference to the file
    }
 
    return result; //return result fo dup2
 }
-
-
-////////// CHEKC IF ABOVE WILL CHANGE PERMISSIONS EVEN ON A READ
-
-
-
 
 /* Spawning a process with job control. fg is true if the 
  * newly-created process is to be placed in the foreground. 
@@ -264,11 +244,10 @@ void spawn_job(job_t *j)
 	process_t *p;
 
   //register this job as active
-  addJobToActiveList(j);
+  activeJobNode* aj = addJobToActiveList(j);
 
   //setup for pipes between the processes
   int fds[2] = {NO_PIPE, NO_PIPE}; //for pipes
-  int status;
   int pipeWrite = NO_PIPE;
   int pipeRead = NO_PIPE;
 
@@ -286,7 +265,7 @@ void spawn_job(job_t *j)
 
 	  switch (pid = fork()) {
 
-      case -1: /* fork failure */
+      case GENERAL_ERROR: /* fork failure */
         perror("fork");
         exit(EXIT_FAILURE);
 
@@ -307,8 +286,8 @@ void spawn_job(job_t *j)
         close(pipeRead);
         pipeRead = fds[0];
         
-        if(!(j->bg)){         // if not background is set
-          seize_tty(j->pgid); // assign the terminal
+        if(j->bg){             // if background job
+          seize_tty(getpid()); // take the terminal
         }
 
      }
@@ -318,52 +297,15 @@ void spawn_job(job_t *j)
    
    }
 
-   //we have run all children concurrently
-   //now we wait for them all to finish
-   //or get paused (WUNTRACED)
-
-   //wait for all processes to be done
-   //ensures that jobs are run sequentially
-   
-   //waitpid((-1 * j->pgid), &status, WUNTRACED);
-   
    //get all the status values of the processes
-   examineProcesses(j);
-
-   //waitpid((-1 * j->pgid), &status, 0);
-
-   //now we might be finished with the job
-   /* if(WIFSTOPPED(status)){ //if stopped by signal
-       if(WSTOPSIG(status) == SIGKILL){
-          printf("\nJob %d was killed.\n", j->pgid);
-          removeJobFromActiveList(j);
-          j->notified = true;
-       } else if(WSTOPSIG(status) == SIGTSTP){
-          printf("\nJob %d was suspended.\n", j->pgid);
-          allProcessesStop(j);
-          j->notified = true;
-       } else {
-          printf("Job %d was stopped for unknown reason.\n", j->pgid);
-          removeJobFromActiveList(j);
-          j->notified = true;
-       }
-    } else { //job complete
-      if(WSTOPSIG(status) == SIGCHLD){
-
-         //just failed to run anything
-         //error already reported, remove job from list
-         removeJobFromActiveList(j); 
-      }
-      allProcessesComplete(j);
-      //j->notified is still false here
-      //don't remove job from job list since
-      //removeJobFromActiveList(j);
-    }*/
+   examineProcesses(j, aj);
 
    //now we might be finished with the job
    if((!job_is_completed(j)) && job_is_stopped(j)){
       printf("\nJob %d was suspended.\n", j->pgid);
       j->notified = true;
+   } else if(aj->crashed){ //if didn't execute
+      removeActiveJobFromList(aj);
    }
 
    //get terminal bach for shell
@@ -374,7 +316,7 @@ void spawn_job(job_t *j)
 
 //fills the status of each processes with status
 //reported from waitpid()
-void examineProcesses(job_t* j){
+void examineProcesses(job_t* j, activeJobNode* aj){
    process_t* current = j->first_process;
    while(current != NULL){
      //get status
@@ -383,8 +325,12 @@ void examineProcesses(job_t* j){
      //detemine meaning of status
      if(WSTOPSIG(current->status) == SIGTSTP){ //suspended
         current->stopped = true;
-     } else if(WIFEXITED(current->status)){
-        current->completed = true;
+     } else if(WIFEXITED(current->status)){    //if continued
+        if(WEXITSTATUS(current->status) == 0){ //if success
+           current->completed = true;
+        } else { //probably something that couldn't be run
+           aj->crashed = true;
+        }
      }
      
      //examing next process
@@ -403,13 +349,13 @@ activeJobNode* newJobNode(job_t* j){
 }
 
 //adds job to active lise
-void addJobToActiveList(job_t* j){
+activeJobNode* addJobToActiveList(job_t* j){
    activeJobNode* current = activeList;
 
    //if first one
    if(current == NULL){ //comparing ptrs
       activeList = newJobNode(j);
-      return;
+      return activeList;
    }
 
    //not first one, go through list
@@ -418,34 +364,7 @@ void addJobToActiveList(job_t* j){
    }
 
    current->next = newJobNode(j);
-   return;
-}
-
-/* OBSELETE */
-//removes job from active list
-void removeJobFromActiveList(job_t* j){
-   activeJobNode* prev = NULL;
-   activeJobNode* current = activeList;
-
-   //if first one
-   if((current->job) == j){ //comparing ptrs
-      activeList = activeList->next; //skip over
-      freeActiveJob(current);
-      return;
-   }
-
-   //not first one, go through list
-   while(current != NULL){ //iterate through list
-      if((current->job) == j){ //if addresses match
-         prev->next = current->next; //skip over current
-         freeActiveJob(current);
-         return;                     //to remove from list
-      }
-      prev = current;
-      current = current->next;
-   }
-
-   return;
+   return current;
 }
 
 //updates jobs from active list
@@ -454,15 +373,15 @@ void removeActiveJobFromList(activeJobNode* aj){
    activeJobNode* current = activeList;
 
    //not first one, go through list
-   while(current != NULL){ //iterate through list
-      if(current == aj){ //if addresses match
-         if(prev == NULL){ //if haven't move from first
+   while(current != NULL){    //iterate through list
+      if(current == aj){      //if addresses match
+         if(prev == NULL){    //if haven't move from first
            activeList = NULL; //remove the only node on the lsit
          } else {
            prev->next = current->next; //skip over current
          }
          freeActiveJob(current);
-         return;                     //to remove from list
+         return;                       //to remove from list
       }
       prev = current;
       current = current->next;
@@ -494,40 +413,27 @@ void freeJob(job_t* j){
 }
 
 /* Sends SIGCONT signal to wake up the blocked job */
-void continue_job(job_t *j) 
+void continue_job(job_t *j, bool bg) 
 {
    if(kill(j->pgid, SIGCONT) < 0){
       perror("kill(SIGCONT)");
    } else {
-      allProcessesGo(j);
-   }
-}
-
-//makes all processes in the job !stopped
-void allProcessesGo(job_t* j){
-   process_t* current = j->first_process;
-   while(current != NULL){
-      current->stopped = false;
-      current = current->next;
+      unStopStoppedProcesses(j);
+      j->bg = bg;
+      if(!bg){ //since not in bg, get the terminal to group
+         seize_tty(j->pgid);
+      }
    }
    return;
 }
 
-//makes all processes in the job !stopped
-void allProcessesComplete(job_t* j){
+//make all stopped processes in non-stopped state
+void unStopStoppedProcesses(job_t* j){
    process_t* current = j->first_process;
    while(current != NULL){
-      current->completed = true;
-      current = current->next;
-   }
-   return;
-}
-
-//make all processes stopped
-void allProcessesStop(job_t* j){
-   process_t* current = j->first_process;
-   while(current != NULL){
-      current->stopped = true;
+      if(current->stopped){
+         current->stopped = false;
+      }
       current = current->next;
    }
    return;
@@ -569,7 +475,15 @@ bool builtin_cmd(job_t* job, int argc, char **argv){
    
    } else if (!strcmp("bg", argv[0])) {
    
-     /* Your code here */
+     //choose job
+     job_t* job = getJobToWakeup(argv[1]);
+
+     //start the job's stopped process
+     if(job != NULL){
+        continue_job(job, true); //continue job in bg
+     } else {
+        printf("Could not find job to continue.\n");
+     }
      return true;
    
    } else if (!strcmp("fg", argv[0])) {
@@ -579,7 +493,7 @@ bool builtin_cmd(job_t* job, int argc, char **argv){
 
      //start the job's stopped process
      if(job != NULL){
-        continue_job(job);
+        continue_job(job, false); //continue job in fg
      } else {
         printf("Could not find job to continue.\n");
      }
@@ -653,7 +567,7 @@ void checkOnProcesses(activeJobNode* jobNode){
       result = waitpid(current->pid, &(current->status), WNOHANG);
 
       if(result != 0){ //dead process
-         if(WEXITSTATUS(current->pid)){ //if not exit code 0 (success)
+         if(WEXITSTATUS(current->status) != 0){ //if not exit code 0 (success)
             jobNode->crashed = true;    //not this for the printing
          } else {
             current->completed = true;
@@ -667,17 +581,25 @@ void checkOnProcesses(activeJobNode* jobNode){
 
 //prints the pid, status and cmd of a single job
 void printSingleActiveJob(activeJobNode* jn){
+   char foregroundStr[] = "foreground";
+   char backgroundStr[] = "background";
+   
+   char* groundStr = foregroundStr;
+   if(jn->job->bg){ 
+      groundStr = backgroundStr;
+   }
+
    if(jn->crashed){
-     printf("\t[%d] ~ %s ~ %s\n", jn->job->pgid, " CRASHED ", jn->job->commandinfo);
-     removeJobFromActiveList(jn->job);
+      printf("\t[%d] (%s) ~ %s ~ %s\n", jn->job->pgid, groundStr, " CRASHED ", jn->job->commandinfo);
+      removeActiveJobFromList(jn);
    } else if(job_is_completed(jn->job)){
-     printf("\t[%d] ~ %s ~ %s\n", jn->job->pgid, "COMPLETED", jn->job->commandinfo);
-     removeJobFromActiveList(jn->job);
+      printf("\t[%d] (%s) ~ %s ~ %s\n", jn->job->pgid, groundStr, "COMPLETED", jn->job->commandinfo);
+      removeActiveJobFromList(jn);
    } else if(job_is_stopped(jn->job)) {
       //compeleted job, remove from list
-      printf("\t[%d] ~ %s ~ %s\n", jn->job->pgid, "SUSPENDED", jn->job->commandinfo);
+      printf("\t[%d] (%s) ~ %s ~ %s\n", jn->job->pgid, groundStr, "SUSPENDED", jn->job->commandinfo);
    } else {
-      printf("\t[%d] ~ %s ~ %s\n", jn->job->pgid, " ACTIVE  ", jn->job->commandinfo);
+      printf("\t[%d] (%s) ~ %s ~ %s\n", jn->job->pgid, groundStr, " ACTIVE  ", jn->job->commandinfo);
    }
    return;
 }
@@ -699,4 +621,3 @@ char* getCurrentPath(void){
    }
    return buf;
 }
-

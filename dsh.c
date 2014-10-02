@@ -37,7 +37,7 @@ void continue_job(job_t *j); /* resume a stopped job */
 void spawn_job(job_t *j); /* spawn a new job */
 
 /* Sets the process group id for a given job and process */
-int set_child_pgid(job_t *j, process_t *p);
+int set_child_pgid(job_t *j, process_t *p, bool child);
 
 /* Creates the context for a new child by setting the pid, pgid and tcsetpgrp */
 void new_child(job_t *j, process_t *p, int inPipe, int outPipe);
@@ -167,7 +167,7 @@ void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
    p->pid = getpid();
    
    /* also establish child process group in child to avoid race (if parent has not done it yet). */
-   set_child_pgid(j, p);
+   set_child_pgid(j, p, true);
 
    /* DEALING WITH INPUT - WE ALREADY HAVE A PIPE OR USE A FILE */
    //change input stream if < used
@@ -191,7 +191,7 @@ void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
    
    /* Set the handling for job control signals back to the default. */
    signal(SIGTTOU, SIG_DFL);
-
+   
    //never coming back after this
    execvp(p->argv[0], p->argv);
 
@@ -199,10 +199,16 @@ void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
 }
 
 /* Sets the process group id for a given job and process */
-int set_child_pgid(job_t *j, process_t *p)
+int set_child_pgid(job_t *j, process_t *p, bool child)
 {
-    if (j->pgid < 0) /* first child: use its pid for job pgid */
+    if (j->pgid < 0){ /* first child: use its pid for job pgid */
         j->pgid = p->pid;
+
+       if(child){
+          printf("[%d] EXECUTING: %s\n", j->pgid, j->commandinfo);
+       }
+    }
+        
     return(setpgid(p->pid,j->pgid)); //set pgid of process to put it in the group
 }
 
@@ -243,7 +249,7 @@ void spawn_job(job_t *j)
   
 	pid_t pid;
 	process_t *p;
-  
+
   //register this job as active
   addJobToActiveList(j);
 
@@ -284,7 +290,7 @@ void spawn_job(job_t *j)
       default: /* parent */
         /* establish child process group */
         p->pid = pid;
-        set_child_pgid(j, p);
+        set_child_pgid(j, p, false);
         close(pipeRead);
         pipeRead = fds[0];
         
@@ -302,6 +308,7 @@ void spawn_job(job_t *j)
    //we have run all children concurrently
    //now we wait for them all to finish
    //or get paused (WUNTRACED)
+
    waitpid((-1 * j->pgid), &status, WUNTRACED);
    //ensures that jobs are run sequentially
    

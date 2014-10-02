@@ -205,7 +205,7 @@ int set_child_pgid(job_t *j, process_t *p, bool child)
         j->pgid = p->pid;
 
        if(child){
-          printf("[%d] EXECUTING: %s\n", j->pgid, j->commandinfo);
+          printf("EXECUTING [%d]: %s\n", j->pgid, j->commandinfo);
        }
     }
         

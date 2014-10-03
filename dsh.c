@@ -453,10 +453,18 @@ void continue_job(job_t *j, bool bg)
    if(kill(j->pgid, SIGCONT) < 0){
       perror("kill(SIGCONT)");
    } else {
+      printf("RESUMING [%d]: %s\n", j->pgid, j->commandinfo);
       unStopStoppedProcesses(j);
+      int status;
+      if(bg){
+        waitpid(j->pgid, &status, WNOHANG);
+      } else {
+        waitpid(j->pgid, &status, WUNTRACED);
+      }
+      /////////////////////////makeAllComplete(j);
       j->bg = bg;
-      if(!bg){ //since not in bg, get the terminal to group
-         seize_tty(j->pgid);
+      if(bg){ //if bg, get the terminal
+         seize_tty(getpid());
       }
    }
    return;
@@ -564,7 +572,6 @@ void printActiveJobs(activeJobNode* list){
    //clean list
    //important for case where a process crashes and doesn't send signal
    cleanActiveJobList(list);
-   //examineProcesses(list->job);
 
    if(list != NULL){
      printf("Active jobs:\n");

@@ -1,6 +1,7 @@
 Makefile
 README
 README.CONTENTS
+a.txt
 batchFile
 cmds
 dsh
@@ -9,10 +10,17 @@ dsh-osx
 dsh.c
 dsh.dSYM
 dsh.h
+dsh.log
 fork-examples
 hello.c
 helper.c
 lab2-faq.txt
 lab2.pdf
+more.txt
 output
 parse.c
+script.dsh
+sd
+stuff.txt
+test.txct
+urls.txt

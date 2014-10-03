@@ -10,12 +10,19 @@
 #define PROMPT_BUF_LEN 15
 
 //length of buffer for string to hold path
-#define PATH_BUF_LEN 1024
+#define PATH_BUF_LEN 18
 
 //flags for IO files
-#define INPUT_FILE_FLAGS     O_RDONLY
+#define INPUT_FILE_FLAGS      O_RDONLY
 #define OUTPUT_FILE_FLAGS    (O_WRONLY | O_TRUNC | O_CREAT)
 #define NEW_FILE_PERMISSIONS (S_IRUSR | S_IWUSR)
+
+//path to the black hole to redirect output for a 
+//child whoes parent seizes tty late
+#define DEV_NULL_PATH "/dev/null"
+
+//code to say we didn't opent the null path
+#define NO_BLACKHOLE -1
 
 //when we have no pipe, use an impossible fd for a pipe
 #define NO_PIPE -1
@@ -26,11 +33,16 @@
 typedef struct _activeList {
    job_t* job; //the job that is active
    bool crashed; //true is a process in the job crashed
+   bool killed;
    struct _activeList* next; //the next node in the LList
 } activeJobNode;
 
 //list of active jobs
 activeJobNode* activeList;
+
+//string for the prompt
+//saves us mallocing and freeing everytime
+char promptString[PROMPT_BUF_LEN];
 
 /* given functions */
 /* Grab control of the terminal for the calling process pgid.  */
@@ -44,12 +56,12 @@ void spawn_job(job_t *j); /* spawn a new job */
 int set_child_pgid(job_t *j, process_t *p, bool child);
 
 /* Creates the context for a new child by setting the pid, pgid and tcsetpgrp */
-void new_child(job_t *j, process_t *p, int inPipe, int outPipe);
+int new_child(job_t *j, process_t *p, int inPipe, int outPipe);
 
 /* builtin_cmd - If the user has typed a built-in command then execute it immediately. */
 bool builtin_cmd(job_t *job, int argc, char **argv);
 
-char* promptmsg(); /* Build prompt messaage */
+char* promptmsg(pid_t pid); /* Build prompt messaage */
 
 
 /* my functions */
@@ -109,8 +121,9 @@ int main(int argc, char* argv[]) {
    //head of a linked list of all jobs that are active
    activeJobNode* activeList = NULL;
 
+   job_t* j;
    while(1) {
-      job_t *j = NULL;
+      j = NULL;
       if(!(j = readcmdline(promptmsg(getpid())))) {
          if (feof(stdin)) { /* End of file (ctrl-d) */
             fflush(stdout);
@@ -141,14 +154,22 @@ void cycleThroughEachJob(job_t* firstJob){
      }
      currentJob = currentJob->next; //check out next job
   }
-
   return;
 }
 
 /* Creates the context for a new child by setting the pid, pgid and tcsetpgrp */
-void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
+int new_child(job_t *j, process_t *p, int inPipe, int outPipe)
 {  
    p->pid = getpid();
+   
+   int blackHole = NO_BLACKHOLE;
+   if(j->bg){ //if background, and parent hasn't seized tty yet
+      //we will redirect to a black hole
+      blackHole = open(DEV_NULL_PATH, O_WRONLY);
+      if(dup2(blackHole, STDOUT_FILENO) == GENERAL_ERROR){
+         perror("Could not redirect stdout no an abyss");
+      }
+   }
    
    /* also establish child process group in child to avoid race (if parent has not done it yet). */
    set_child_pgid(j, p, true);
@@ -162,12 +183,10 @@ void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
    } else if(p->ifile != NULL){
       if(changeStreamToFile(p->ifile, STDIN_FILENO, INPUT_FILE_FLAGS) == GENERAL_ERROR){
         //perror("Error updating input stream");
-        return; //if error, return, don't exec
+        return blackHole; //if error, return, don't exec
       }
-   } else {
-      if(!(j->bg)){          //if not a background job
-        seize_tty(getpid()); //take the terminal
-      }
+   } else if(!(j->bg)){
+      seize_tty(p->pid);
    }
 
    /* DEALING WITH OUTPUT - PIPE OR FILE */
@@ -178,7 +197,7 @@ void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
       }
    } else if(changeStreamToFile(p->ofile, STDOUT_FILENO, OUTPUT_FILE_FLAGS) == GENERAL_ERROR){
       //perror("Error updating output stream");
-      return; //if error, return, don't exec
+      return blackHole; //if error, return, don't exec
    }
    
    /* Set the handling for job control signals back to the default. */
@@ -187,7 +206,7 @@ void new_child(job_t *j, process_t *p, int inPipe, int outPipe)
    //never coming back after this
    execvp(p->argv[0], p->argv);
 
-   return; //token return
+   return blackHole; //if failed to exec we come here
 }
 
 /* Sets the process group id for a given job and process */
@@ -271,7 +290,12 @@ void spawn_job(job_t *j)
 
       case 0: /* child process  */
         p->pid = getpid();
-        new_child(j, p, pipeRead, pipeWrite);
+        int blackHole = new_child(j, p, pipeRead, pipeWrite);
+        
+        //if we return, did they open the black hole?
+        if(blackHole != NO_BLACKHOLE){
+           close(blackHole);
+        }
         
         /* YOUR CODE HERE?  Child-side code for new process. */
         kill(j->pgid, SIGCHLD); //tell parent of failure
@@ -283,6 +307,7 @@ void spawn_job(job_t *j)
         /* establish child process group */
         p->pid = pid;
         set_child_pgid(j, p, false);
+        close(pipeWrite);
         close(pipeRead);
         pipeRead = fds[0];
         
@@ -299,7 +324,7 @@ void spawn_job(job_t *j)
 
    //get all the status values of the processes
    examineProcesses(j, aj);
-
+   
    //now we might be finished with the job
    if((!job_is_completed(j)) && job_is_stopped(j)){
       printf("\nJob %d was suspended.\n", j->pgid);
@@ -310,7 +335,6 @@ void spawn_job(job_t *j)
 
    //get terminal bach for shell
    seize_tty(getpid());
-
    return;
 }
 
@@ -320,8 +344,12 @@ void examineProcesses(job_t* j, activeJobNode* aj){
    process_t* current = j->first_process;
    while(current != NULL){
      //get status
-     waitpid(current->pid, &(current->status), WUNTRACED);
 
+     if(j->bg){ //if background job, don't wait on it
+        waitpid(current->pid, &(current->status), WNOHANG);
+     } else {   //if foreground job we wait on it as the parent
+        waitpid(current->pid, &(current->status), WUNTRACED);
+     }
      //detemine meaning of status
      if(WSTOPSIG(current->status) == SIGTSTP){ //suspended
         current->stopped = true;
@@ -334,7 +362,7 @@ void examineProcesses(job_t* j, activeJobNode* aj){
      }
      
      //examing next process
-       current = current->next;
+     current = current->next;
    }
    return;
 }
@@ -344,6 +372,7 @@ activeJobNode* newJobNode(job_t* j){
    activeJobNode* node = (activeJobNode*) malloc(sizeof(struct _activeList)); 
    node->job = j;
    node->crashed = false;
+   node->killed = false;
    node->next = NULL;
    return node;
 }
@@ -364,7 +393,7 @@ activeJobNode* addJobToActiveList(job_t* j){
    }
 
    current->next = newJobNode(j);
-   return current;
+   return (current->next);
 }
 
 //updates jobs from active list
@@ -404,6 +433,12 @@ void freeJob(job_t* j){
       p = j->first_process;
       while(p != NULL){
          pNext = p->next;
+         for(int i = 0; i < p->argc; i++){
+           free(p->argv[i]);
+         }
+         free(p->argv);
+         free(p->ifile);
+         free(p->ofile);
          free(p);
          p = pNext;
       }
@@ -449,7 +484,6 @@ bool builtin_cmd(job_t* job, int argc, char **argv){
    
    if (!strcmp(argv[0], "quit")) {
    
-      /* Your code here */ //??????????????????????
       exit(EXIT_SUCCESS);
    
    } else if (!strcmp("jobs", argv[0])) {
@@ -457,7 +491,6 @@ bool builtin_cmd(job_t* job, int argc, char **argv){
       //our list is already in sorted order
       //we just have to print the list
       printActiveJobs(activeList);
-      
       return true;
    
    } else if (!strcmp("cd", argv[0])) {
@@ -500,7 +533,8 @@ bool builtin_cmd(job_t* job, int argc, char **argv){
      return true;
    
    }
-   return false;       /* not a builtin command */
+
+   return false; /* not a builtin command */
 }
 
 //gives back the job number
@@ -569,6 +603,8 @@ void checkOnProcesses(activeJobNode* jobNode){
       if(result != 0){ //dead process
          if(WEXITSTATUS(current->status) != 0){ //if not exit code 0 (success)
             jobNode->crashed = true;    //not this for the printing
+         } else if(WIFSIGNALED(current->status)){
+            jobNode->killed = true;
          } else {
             current->completed = true;
          }
@@ -592,9 +628,12 @@ void printSingleActiveJob(activeJobNode* jn){
    if(jn->crashed){
       printf("\t[%d] (%s) ~ %s ~ %s\n", jn->job->pgid, groundStr, " CRASHED ", jn->job->commandinfo);
       removeActiveJobFromList(jn);
+   } else if(jn->killed){
+      printf("\t[%d] (%s) ~ %s ~ %s\n", jn->job->pgid, groundStr, "SIGNAL TERMINATED", jn->job->commandinfo);
+      removeActiveJobFromList(jn);
    } else if(job_is_completed(jn->job)){
       printf("\t[%d] (%s) ~ %s ~ %s\n", jn->job->pgid, groundStr, "COMPLETED", jn->job->commandinfo);
-      removeActiveJobFromList(jn);
+      removeActiveJobFromList(jn);  
    } else if(job_is_stopped(jn->job)) {
       //compeleted job, remove from list
       printf("\t[%d] (%s) ~ %s ~ %s\n", jn->job->pgid, groundStr, "SUSPENDED", jn->job->commandinfo);
@@ -606,10 +645,12 @@ void printSingleActiveJob(activeJobNode* jn){
 
 /* Build prompt messaage */
 char* promptmsg(pid_t pid){
-  /* Modify this to include pid */
-  char* str = (char*) malloc(PROMPT_BUF_LEN * sizeof(char));
-  sprintf(str, "dsh[%d]$ ", (int) pid);
-	return str;
+  if(isatty(STDIN_FILENO)){ //if we have input from terminal
+    sprintf(promptString, "dsh[%d]$ ", (int) pid); //print prompt
+  } else {
+    sprintf(promptString, ""); //other wise we print blank (nothing)
+  }
+	return promptString;
 }
 
 //gets a pointer to a string of the current path

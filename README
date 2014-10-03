@@ -12,7 +12,7 @@
 
 	Name1:  Julian Borrey
 	NetId1: jcb62
-	Time spent: 1 hours
+	Time spent: 24 hours
 
 /******************
  * Files to submit
@@ -25,35 +25,89 @@
  * Implementation details
  *************************/
 
-/* 
- * This section should contain the implementation details and a overview of the
- * results. 
+All aspects of the shell that was asked for in the lab handout were implemented.
+This includes the support for background jobs with '&' on the end. Below I have 
+detailed my implementation.
 
- * You are expected to provide a good README document including the
- * implementation details. In particular, you can use pseudocode to describe your
- * implementation details where necessary. However that does not mean to
- * copy/paste your C code. Specifically, you should summarize details corresponding 
- * to (1) multiple pipelines (2) job control (3) logging (3) .c commands 
- * compilation and execution. We expect the design and implementation details to 
- * be at most 1-2 pages.  A plain textfile is requested. 
+Multiple Pipelines:
+===================
+The basics of the implementation are outlined in the pseudo code below:
 
- * In case of lab is limited in some functionality, you should provide the
- * details to maximize your partial credit.  
- * */
+LOOP BEGIN (looping through processes of a job)
+	1. make variables pipeWrite and pipeRead = -1 (no pipe)
+	2. if current process -> next != NULL, we must make a pipe to pass data
+		3. make the pipe and store the two FDs as pipeWrite and pipeRead
+	
+
+	4. give the child (input to new_child()) both pipeRead (from previous iteration) and pipeWrite (from current iteration)
+	5. as a child, if pipeRead  != -1, dup() stdin to the pipeRead FD.
+	6. as a child, if pipeWrite != -1, dup() stdout to the pipeWrite FD.
+	
+	7. as a parent, keep the pipeWrite aside and give to the next process when we loop again
+	8. as a parent, close the pipeRead and pipeWrite, parent will not use them
+LOOP END
+
+This loop which goes through each process in a job allows every process to run concurrently
+and have an infinite number of pipes linking them together. The dsh process is the overlord 
+of making and dealing out the pipes and it does this as necessary per the child.
+
+If the child has other things to do, like open a file for IO, it does that rather than use the pipe.
+For input and output there are IF statements to choose how to do setup before exec().
+
+Job Control:
+============
+The jobs command will report what is currently happening among all processes which are active.
+If a process is complete but the user has not been notified by calling jobs previously when the 
+process had been complete, then we still print it out in the list of active jobs. It will appear 
+complete and then not appear in subsequent calls to jobs.
+
+Jobs will report jobs as:
+   * Complete         (removed from list after notification)
+   * Active
+   * Suspended
+   * Crashed          (removed from list after notification)
+   * Killed by signal (removed from list after notification)
+
+Everything on the list is printed as an iteration over the ActiveList occurs.
+The active list is just a linked list of jobs which contains a pointer to a 
+job struct and some data about how it may have died (crash or killed by signal).
+For the reports on complete, crashed and killed we remove from the list after 
+reporting to ensure they do not linger unnecessarily in the list.
+
+For foreground jobs:
+When a foreground job (child) is executing there is a function (parent) that scans through 
+all the processes and will wait until they have stopped (exit or suspended). After each wait we record 
+the status and update the process structs based on this. When "jobs" is called 
+the process struct values (stopped, complete) are looked at in order to know what 
+to print (suspended vs complete).
+If a jobs was then continued in the background, the list is updated by polling 
+the processes with waitpid() just prior to printing out the jobs list.
+
+For background jobs:
+When "jobs" is called a function is used to query all the process which are 
+in the active jobs. From this we can fill the active job structs just prior 
+to printing out the list. By looking at the return value of waitpid() and 
+the status value that gets filled so we can determine if a normal exit was done 
+or if the child was killed by crash or signal.
+
+Background Jobs:
+================
+When a job is noted as background a few differnt pieces of configuration occur.
+	* The child process will not seize tty as stdin or stdout.
+	* The parent will immediately (by using wiatpid() with WNOHANG) seize tty back.
+	* The jobs command will change if it prints "foreground" or "background".
+	* A function to send a SIGCONT singal to a child if it is suspended used. If 
+	  bg is called, then the tty is also siezed after sending the signal. (This 
+	  would not happen on fg where the child would seize tty).
 
 /************************
  * Feedback on the lab
  ************************/
 
-/*
- * Any comments/questions/suggestions/experiences that you would help us to
- * improve the lab.
- * */
+Lots of fun and good system level (approaching system level) stuff.
 
 /************************
  * References
  ************************/
 
-/*
- * List of collaborators involved including any online references/citations.
- * */
+Just the notes suggested in the hand out and all of the man pages.

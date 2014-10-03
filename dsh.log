@@ -1,18 +1,11 @@
-6008(Launched): %s
-execvp: No such file or directory
-6010(Launched): 0
-execvp: No such file or directory
-6011(Launched): 0
-execvp: No such file or directory
-6012(Launched): 00
-execvp: No such file or directory
-6013(Launched): cat a[C[C[C[C[C[C[C[C[
-cat: a\033[C\033[C\033[C\033[C\033[C\033[C\033[C\033[C\033[: No such file or directory
-6014(Launched): l
-execvp: No such file or directory
-6015(Launched): f
-execvp: No such file or directory
-6016(Launched): clear
-6017(Launched): l
-execvp: No such file or directory
-6018(Launched): cat a.txt
+14801(Launched): ls
+14802(Launched): ls | wc
+14801(Completed): ls
+14802(Completed): ls | wc
+14804(Launched): cat < Makefile | wc > output 
+14804(Completed): cat < Makefile | wc > output 
+14806(Launched): cat Makefile | wc | ls
+14809(Launched): cat < Makefile | wc | ls > output
+14812(Launched): cat Makefile | wc < Makefile | ls > output
+14815(Launched): cat < Makefile | wc < Makefile | ls > output
+14818(Launched): ls | sort | wc
